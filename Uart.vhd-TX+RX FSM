@@ -1,0 +1,114 @@
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+use IEEE.NUMERIC_STD.ALL;
+
+entity uart is
+    Generic (
+        CLK_FREQ : integer := 50000000; -- 50MHz FPGA clock
+        BAUD_RATE: integer := 9600      -- Standard baud rate
+    );
+    Port ( 
+        clk     : in  STD_LOGIC;
+        rst     : in  STD_LOGIC;
+        -- TX Side
+        tx_start: in  STD_LOGIC;
+        tx_data : in  STD_LOGIC_VECTOR(7 downto 0);
+        tx      : out STD_LOGIC;
+        tx_busy : out STD_LOGIC;
+        -- RX Side
+        rx      : in  STD_LOGIC;
+        rx_data : out STD_LOGIC_VECTOR(7 downto 0);
+        rx_done : out STD_LOGIC
+    );
+end uart;
+
+architecture Behavioral of uart is
+    constant BAUD_DIV : integer := CLK_FREQ / BAUD_RATE;
+    
+    -- TX FSM
+    type tx_state_type is (IDLE, START, DATA, STOP);
+    signal tx_state : tx_state_type := IDLE;
+    signal tx_counter : integer range 0 to BAUD_DIV-1 := 0;
+    signal tx_bit_index : integer range 0 to 7 := 0;
+    signal tx_shift_reg : STD_LOGIC_VECTOR(7 downto 0);
+    
+    -- RX FSM  
+    type rx_state_type is (IDLE, START, DATA, STOP);
+    signal rx_state : rx_state_type := IDLE;
+    signal rx_counter : integer range 0 to BAUD_DIV-1 := 0;
+    signal rx_bit_index : integer range 0 to 7 := 0;
+    signal rx_shift_reg : STD_LOGIC_VECTOR(7 downto 0);
+    signal rx_sample_en : STD_LOGIC;
+    
+begin
+    -- TX Process
+    process(clk, rst)
+    begin
+        if rst = '1' then
+            tx_state <= IDLE; tx <= '1'; tx_busy <= '0';
+            tx_counter <= 0; tx_bit_index <= 0;
+        elsif rising_edge(clk) then
+            case tx_state is
+                when IDLE =>
+                    tx <= '1'; tx_busy <= '0';
+                    if tx_start = '1' then
+                        tx_shift_reg <= tx_data;
+                        tx_state <= START;
+                        tx_busy <= '1';
+                    end if;
+                when START =>
+                    tx <= '0'; -- Start bit
+                    if tx_counter = BAUD_DIV-1 then
+                        tx_counter <= 0; tx_state <= DATA;
+                    else tx_counter <= tx_counter + 1; end if;
+                when DATA =>
+                    tx <= tx_shift_reg(tx_bit_index);
+                    if tx_counter = BAUD_DIV-1 then
+                        tx_counter <= 0;
+                        if tx_bit_index = 7 then
+                            tx_bit_index <= 0; tx_state <= STOP;
+                        else tx_bit_index <= tx_bit_index + 1; end if;
+                    else tx_counter <= tx_counter + 1; end if;
+                when STOP =>
+                    tx <= '1'; -- Stop bit
+                    if tx_counter = BAUD_DIV-1 then
+                        tx_counter <= 0; tx_state <= IDLE;
+                    else tx_counter <= tx_counter + 1; end if;
+            end case;
+        end if;
+    end process;
+    
+    -- RX Process
+    process(clk, rst)
+    begin
+        if rst = '1' then
+            rx_state <= IDLE; rx_data <= (others=>'0'); rx_done <= '0';
+            rx_counter <= 0; rx_bit_index <= 0;
+        elsif rising_edge(clk) then
+            rx_done <= '0';
+            case rx_state is
+                when IDLE =>
+                    if rx = '0' then -- Detect start bit
+                        rx_state <= START; rx_counter <= BAUD_DIV/2; -- Sample mid-bit
+                    end if;
+                when START =>
+                    if rx_counter = BAUD_DIV-1 then
+                        rx_counter <= 0; rx_state <= DATA;
+                    else rx_counter <= rx_counter + 1; end if;
+                when DATA =>
+                    if rx_counter = BAUD_DIV-1 then
+                        rx_counter <= 0;
+                        rx_shift_reg(rx_bit_index) <= rx;
+                        if rx_bit_index = 7 then
+                            rx_bit_index <= 0; rx_state <= STOP;
+                        else rx_bit_index <= rx_bit_index + 1; end if;
+                    else rx_counter <= rx_counter + 1; end if;
+                when STOP =>
+                    if rx_counter = BAUD_DIV-1 then
+                        rx_data <= rx_shift_reg; rx_done <= '1';
+                        rx_state <= IDLE;
+                    else rx_counter <= rx_counter + 1; end if;
+            end case;
+        end if;
+    end process;
+end Behavioral;
